@@ -1,46 +1,56 @@
-class CircuitBreaker
-  attr_reader :state, :failures, :threshold, :timeout
-  STATES = [:closed, :open, :half_open]
+require 'thread'
 
-  def initialize(threshold: 3, timeout: 10, fallback: nil)
+class CircuitBreaker
+  STATES = [:closed, :open, :half_open].freeze
+  attr_reader :state, :failure_count, :threshold, :recovery_timeout
+
+  def initialize(threshold: 5, recovery_timeout: 10)
     @threshold = threshold
-    @timeout = timeout
-    @fallback = fallback
-    @failures = 0
+    @recovery_timeout = recovery_timeout
+    @failure_count = 0
     @state = :closed
-    @last_failure_time = nil
+    @last_failure_time = Time.now
+    @mutex = Mutex.new
   end
 
-  def call(&block)
-    check_state
-    if @state == :open
-      return @fallback.call if @fallback
-      raise "CircuitBreaker is OPEN"
+  def execute(&block)
+    @mutex.synchronize do
+      check_state_transition
+      raise "CircuitBreaker: Circuit is OPEN" if @state == :open
     end
+
     begin
-      res = block.call
+      result = yield
       on_success
-      res
-    rescue => e
+      result
+    rescue StandardError => e
       on_failure
-      return @fallback.call if @fallback
       raise e
     end
   end
 
   private
-  def on_success
-    @failures = 0
-    @state = :closed
-  end
-  def on_failure
-    @failures += 1
-    @last_failure_time = Time.now
-    @state = :open if @failures >= @threshold
-  end
-  def check_state
-    if @state == :open && Time.now - @last_failure_time > @timeout
+
+  def check_state_transition
+    if @state == :open && (Time.now - @last_failure_time) > @recovery_timeout
       @state = :half_open
+    end
+  end
+
+  def on_success
+    @mutex.synchronize do
+      @failure_count = 0
+      @state = :closed
+    end
+  end
+
+  def on_failure
+    @mutex.synchronize do
+      @failure_count += 1
+      @last_failure_time = Time.now
+      if @failure_count >= @threshold || @state == :half_open
+        @state = :open
+      end
     end
   end
 end
